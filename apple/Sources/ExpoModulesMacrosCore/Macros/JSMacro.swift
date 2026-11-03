@@ -31,6 +31,7 @@ public struct JSMacro: PeerMacro {
     providingPeersOf declaration: some DeclSyntaxProtocol,
     in context: some MacroExpansionContext
   ) throws -> [DeclSyntax] {
+    diagnosePlacement(of: node, on: declaration, in: context)
     diagnoseParameterSpecifiers(in: declaration, in: context)
     diagnoseFreeFormTypes(in: declaration, in: context)
     diagnoseClosureTypes(in: declaration, in: context)
@@ -73,6 +74,82 @@ private func isInBindingClass(_ context: some MacroExpansionContext) -> Bool {
   }
   return classDecl.attributes.firstAttribute(named: "ExpoModule") != nil
     || classDecl.attributes.firstAttribute(named: "SharedObject") != nil
+}
+
+/// Reports a `@JS` attribute that no macro binds, so the member would be missing in JavaScript without
+/// an error:
+/// - on a declaration other than a function, property or initializer, such as a subscript;
+/// - on a member of an extension, since `@ExpoModule` and `@SharedObject` read only the class body;
+/// - on an initializer of an `@ExpoModule` class, since JavaScript doesn't construct a module.
+private func diagnosePlacement(
+  of node: AttributeSyntax,
+  on declaration: some DeclSyntaxProtocol,
+  in context: some MacroExpansionContext
+) {
+  guard
+    declaration.is(FunctionDeclSyntax.self) || declaration.is(VariableDeclSyntax.self)
+      || declaration.is(InitializerDeclSyntax.self)
+  else {
+    let kind = declaration.is(SubscriptDeclSyntax.self) ? "a subscript" : "this declaration"
+    context.diagnose(
+      Diagnostic(
+        node: node,
+        message: JSDiagnosticMessage(
+          "@JS applies to a function, property or initializer, so \(kind) isn't bound to JavaScript. Expose a @JS function instead.",
+          id: "js-unsupported-declaration",
+          severity: .error
+        )
+      )
+    )
+    return
+  }
+  if let extensionDecl = context.lexicalContext.first?.as(ExtensionDeclSyntax.self) {
+    let typeName = extensionDecl.extendedType.trimmedDescription
+    context.diagnose(
+      Diagnostic(
+        node: node,
+        message: JSDiagnosticMessage(
+          "A @JS member of an extension isn't bound to JavaScript: @ExpoModule and @SharedObject bind only the @JS members declared in the class body. Move the member into the declaration of '\(typeName)'.",
+          id: "js-in-extension",
+          severity: .error
+        )
+      )
+    )
+    return
+  }
+  if let initDecl = declaration.as(InitializerDeclSyntax.self),
+    let classDecl = context.lexicalContext.first?.as(ClassDeclSyntax.self),
+    classDecl.attributes.firstAttribute(named: "ExpoModule") != nil
+  {
+    context.diagnose(
+      Diagnostic(
+        node: node,
+        message: JSDiagnosticMessage(
+          "@JS on an initializer of an @ExpoModule class isn't bound to JavaScript: JavaScript doesn't construct a module, it gets the instance that the app context creates. Remove @JS, or construct a @SharedObject class from JavaScript instead.",
+          id: "js-module-initializer",
+          severity: .error
+        ),
+        fixIts: removeAttributeFixIts(node, before: initDecl.initKeyword)
+      )
+    )
+  }
+}
+
+/// The fix-it that removes a `@JS` attribute written on its own line, with the line break and
+/// indentation before it. The macro gets the attribute without the trivia after it, so when the
+/// declaration starts on the line of the attribute (`@JS init()`), the fix-it can't tell how much
+/// space to remove, and there is none. It edits only the text of the attribute, since the declaration
+/// that a peer macro gets can carry attributes that other macros added.
+private func removeAttributeFixIts(_ node: AttributeSyntax, before keyword: TokenSyntax) -> [FixIt] {
+  guard keyword.leadingTrivia.contains(where: \.isNewline) else {
+    return []
+  }
+  return [
+    FixIt(
+      message: JSFixItMessage("Remove '@JS'", id: "js-remove-attribute"),
+      changes: [.replaceText(range: node.position..<node.endPosition, with: "", in: Syntax(node))]
+    )
+  ]
 }
 
 /// Emits the diagnostic for `@JS(.concurrent)` on a member that can't take it. The option maps to

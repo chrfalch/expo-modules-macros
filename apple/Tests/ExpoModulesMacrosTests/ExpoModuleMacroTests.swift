@@ -3594,4 +3594,181 @@ struct ExpoModuleMacroTests {
       ]
     )
   }
+
+  @Test
+  func `@JS in an extension is diagnosed on the attribute`() {
+    assertExpansion(
+      """
+      extension MyModule {
+        @JS
+        func greet(name: String) -> String { name }
+      }
+      """,
+      expandedSource: """
+        extension MyModule {
+          func greet(name: String) -> String { name }
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "A @JS member of an extension isn't bound to JavaScript: @ExpoModule and @SharedObject bind only the @JS members declared in the class body. Move the member into the declaration of 'MyModule'.",
+          line: 2,
+          column: 3,
+          severity: .error
+        )
+      ]
+    )
+  }
+
+  @Test
+  func `@JS on a module initializer is diagnosed with a fix-it that removes it`() {
+    assertExpansion(
+      """
+      @ExpoModule
+      public final class MyModule: Module {
+        @JS
+        init() {}
+      }
+      """,
+      expandedSource: """
+        public final class MyModule: Module {
+          @JavaScriptActor
+          init() {}
+
+          public static let _jsName = "MyModule"
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "@JS on an initializer of an @ExpoModule class isn't bound to JavaScript: JavaScript doesn't construct a module, it gets the instance that the app context creates. Remove @JS, or construct a @SharedObject class from JavaScript instead.",
+          line: 3,
+          column: 3,
+          severity: .error,
+          fixIts: [FixItSpec(message: "Remove '@JS'")]
+        )
+      ],
+      fixedSource: """
+        @ExpoModule
+        public final class MyModule: Module {
+          init() {}
+        }
+        """
+    )
+  }
+
+  @Test
+  func `@JS on a module initializer on the same line has no fix-it`() {
+    assertExpansion(
+      """
+      @ExpoModule
+      public final class MyModule: Module {
+        @JS init() {}
+      }
+      """,
+      expandedSource: """
+        public final class MyModule: Module {
+          @JavaScriptActor init() {}
+
+          public static let _jsName = "MyModule"
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "@JS on an initializer of an @ExpoModule class isn't bound to JavaScript: JavaScript doesn't construct a module, it gets the instance that the app context creates. Remove @JS, or construct a @SharedObject class from JavaScript instead.",
+          line: 3,
+          column: 3,
+          severity: .error
+        )
+      ]
+    )
+  }
+
+  @Test
+  func `@JS on a subscript is diagnosed on the attribute`() {
+    assertExpansion(
+      """
+      @ExpoModule
+      public final class MyModule: Module {
+        @JS
+        subscript(index: Int) -> Int { index }
+      }
+      """,
+      expandedSource: """
+        public final class MyModule: Module {
+          subscript(index: Int) -> Int { index }
+
+          public static let _jsName = "MyModule"
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "@JS applies to a function, property or initializer, so a subscript isn't bound to JavaScript. Expose a @JS function instead.",
+          line: 3,
+          column: 3,
+          severity: .error
+        )
+      ]
+    )
+  }
+
+  @Test
+  func `Two events with the same JS name are a warning on the later one`() {
+    assertExpansion(
+      """
+      @ExpoModule
+      public final class MyModule: Module {
+        @Event
+        var onProgress: () -> Void
+        @Event
+        var progress: () -> Void
+      }
+      """,
+      expandedSource: """
+        public final class MyModule: Module {
+          var onProgress: () -> Void {
+            get {
+              { [weak self] in
+                self?.emit(event: "progress")
+              }
+            }
+          }
+
+          private func _assertTypesConformance_onProgress() {
+            func onProgress(_: (some EventEmitter).Type) {
+            }
+            onProgress(MyModule.self)
+          }
+          var progress: () -> Void {
+            get {
+              { [weak self] in
+                self?.emit(event: "progress")
+              }
+            }
+          }
+
+          private func _assertTypesConformance_progress() {
+            func progress(_: (some EventEmitter).Type) {
+            }
+            progress(MyModule.self)
+          }
+
+          public static let _jsName = "MyModule"
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "The event name 'progress' is already used by the earlier @Event 'onProgress'. Both properties emit the same event, so a JavaScript listener can't tell them apart. Give one of them another name with @Event(\"...\").",
+          line: 6,
+          column: 7,
+          severity: .warning,
+          notes: [NoteSpec(message: "'progress' is first used here", line: 4, column: 7)]
+        )
+      ]
+    )
+  }
 }
