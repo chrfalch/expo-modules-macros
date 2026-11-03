@@ -568,7 +568,7 @@ struct ExpoModuleMacroTests {
   }
 
   @Test
-  func `Static function emits a static conformance-assertion peer`() {
+  func `A static @JS member of a module is diagnosed and left out of the binding`() {
     assertExpansion(
       """
       @ExpoModule
@@ -583,26 +583,17 @@ struct ExpoModuleMacroTests {
           static func describe(_ value: MyRecord) -> String { "" }
 
           public static let _jsName = "MyModule"
-
-          @JavaScriptActor
-          public func _decorateModule(object: borrowing JavaScriptObject, in runtime: JavaScriptRuntime) throws {
-            object.setProperty("describe") { [self] (this: borrowing JavaScriptUnownedValue, arguments: consuming JavaScriptValuesBuffer, result: borrowing JavaScriptValue.Slot, runtime: borrowing JavaScriptRuntime) in
-              guard arguments.count == 1 else {
-                throw Exceptions.ArgumentsRangeMismatch((functionName: "describe", received: arguments.count, required: 1, maximum: 1))
-              }
-              let arg0 = try MyRecord.decode(arguments.unownedValue(at: 0), in: runtime)
-              let value = self.describe(arg0)
-              try String.encode(value, into: result, in: runtime)
-            }
-          }
-
-          private func _assertTypesConformance() {
-            func describe(_: (some JavaScriptDecodable & ~Copyable).Type) {
-            }
-            describe(MyRecord.self)
-          }
         }
-        """
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "A @JS member of an @ExpoModule class can't be 'static' or 'class': JavaScript gets one module object, and @ExpoModule binds the members of the instance to it. Make the member an instance member.",
+          line: 3,
+          column: 3,
+          severity: .error
+        )
+      ]
     )
   }
 
@@ -3767,6 +3758,62 @@ struct ExpoModuleMacroTests {
           column: 7,
           severity: .warning,
           notes: [NoteSpec(message: "'progress' is first used here", line: 4, column: 7)]
+        )
+      ]
+    )
+  }
+
+  @Test
+  func `@JS on a member of a type without a binding macro is diagnosed on the attribute`() {
+    assertExpansion(
+      """
+      final class Helper {
+        @JS
+        func greet() {}
+      }
+      """,
+      expandedSource: """
+        final class Helper {
+          func greet() {}
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "A @JS member of 'Helper' isn't bound to JavaScript: only an @ExpoModule or @SharedObject class binds its @JS members. Add one of these macros to 'Helper', or move the member into such a class.",
+          line: 2,
+          column: 3,
+          severity: .error
+        )
+      ]
+    )
+  }
+
+  @Test
+  func `A generic @JS function is diagnosed and left out of the binding`() {
+    assertExpansion(
+      """
+      @ExpoModule
+      public final class MyModule: Module {
+        @JS
+        func echo<T: JavaScriptCodable>(_ value: T) -> T { value }
+      }
+      """,
+      expandedSource: """
+        public final class MyModule: Module {
+          @JavaScriptActor
+          func echo<T: JavaScriptCodable>(_ value: T) -> T { value }
+
+          public static let _jsName = "MyModule"
+        }
+        """,
+      diagnostics: [
+        DiagnosticSpec(
+          message:
+            "A @JS function or initializer can't be generic: the binding decodes each argument and encodes the result by its static type, which a generic parameter doesn't have. Use a concrete type, a @Union of the types, or 'JavaScriptValue'.",
+          line: 5,
+          column: 12,
+          severity: .error
         )
       ]
     )

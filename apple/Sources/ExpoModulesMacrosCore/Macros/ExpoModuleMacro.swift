@@ -63,6 +63,16 @@ public struct ExpoModuleMacro: MemberMacro {
     for member in classDecl.memberBlock.members {
       // The types of a `@JS` member are read with the class's tuple aliases resolved.
       let decl = aliases.resolving(member.decl)
+      // A generic member is reported by `@JS` and left out, so the build has no errors in its binding.
+      if memberHasJSAttribute(decl) && jsGenericParameterClause(of: decl) != nil {
+        continue
+      }
+      // So is a `static` or `class` member: the module object binds only instance members.
+      if memberHasJSAttribute(decl),
+        let modifiers = decl.asProtocol(WithModifiersSyntax.self)?.modifiers, isTypeLevel(modifiers)
+      {
+        continue
+      }
       if memberHasJSAttribute(decl), let assertion = jsConformanceAssertionBody(for: decl) {
         assertions.append(assertion)
       }
@@ -86,6 +96,7 @@ public struct ExpoModuleMacro: MemberMacro {
     }
 
     diagnoseJSNameCollisions(functions: functions, properties: properties, in: context)
+    diagnoseReservedJSNames(functions: functions, properties: properties, on: .module, in: context)
     diagnoseEventNameCollisions(in: classDecl.memberBlock, in: context)
 
     var emitted: [DeclSyntax] = []

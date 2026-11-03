@@ -32,6 +32,19 @@ public struct JSMacro: PeerMacro {
     in context: some MacroExpansionContext
   ) throws -> [DeclSyntax] {
     diagnosePlacement(of: node, on: declaration, in: context)
+    if let genericParameterClause = jsGenericParameterClause(of: declaration) {
+      context.diagnose(
+        Diagnostic(
+          node: genericParameterClause,
+          message: JSDiagnosticMessage(
+            "A @JS function or initializer can't be generic: the binding decodes each argument and encodes the result by its static type, which a generic parameter doesn't have. Use a concrete type, a @Union of the types, or 'JavaScriptValue'.",
+            id: "js-generic-member",
+            severity: .error
+          )
+        )
+      )
+      return []
+    }
     diagnoseParameterSpecifiers(in: declaration, in: context)
     diagnoseFreeFormTypes(in: declaration, in: context)
     diagnoseClosureTypes(in: declaration, in: context)
@@ -80,6 +93,8 @@ private func isInBindingClass(_ context: some MacroExpansionContext) -> Bool {
 /// an error:
 /// - on a declaration other than a function, property or initializer, such as a subscript;
 /// - on a member of an extension, since `@ExpoModule` and `@SharedObject` read only the class body;
+/// - on a member of a type that isn't an `@ExpoModule` or `@SharedObject` class;
+/// - on a `static` or `class` member of an `@ExpoModule` class, since JavaScript gets only the instance;
 /// - on an initializer of an `@ExpoModule` class, since JavaScript doesn't construct a module.
 private func diagnosePlacement(
   of node: AttributeSyntax,
@@ -111,6 +126,38 @@ private func diagnosePlacement(
         message: JSDiagnosticMessage(
           "A @JS member of an extension isn't bound to JavaScript: @ExpoModule and @SharedObject bind only the @JS members declared in the class body. Move the member into the declaration of '\(typeName)'.",
           id: "js-in-extension",
+          severity: .error
+        )
+      )
+    )
+    return
+  }
+  if let enclosingType = context.lexicalContext.first, enclosingType.isProtocol(DeclGroupSyntax.self),
+    !isInBindingClass(context)
+  {
+    let typeName = enclosingType.asProtocol(NamedDeclSyntax.self).map { "'\($0.name.text)'" } ?? "this type"
+    context.diagnose(
+      Diagnostic(
+        node: node,
+        message: JSDiagnosticMessage(
+          "A @JS member of \(typeName) isn't bound to JavaScript: only an @ExpoModule or @SharedObject class binds its @JS members. Add one of these macros to \(typeName), or move the member into such a class.",
+          id: "js-outside-binding-class",
+          severity: .error
+        )
+      )
+    )
+    return
+  }
+  if let modifiers = declaration.asProtocol(WithModifiersSyntax.self)?.modifiers, isTypeLevel(modifiers),
+    let classDecl = context.lexicalContext.first?.as(ClassDeclSyntax.self),
+    classDecl.attributes.firstAttribute(named: "ExpoModule") != nil
+  {
+    context.diagnose(
+      Diagnostic(
+        node: node,
+        message: JSDiagnosticMessage(
+          "A @JS member of an @ExpoModule class can't be 'static' or 'class': JavaScript gets one module object, and @ExpoModule binds the members of the instance to it. Make the member an instance member.",
+          id: "js-module-static-member",
           severity: .error
         )
       )
