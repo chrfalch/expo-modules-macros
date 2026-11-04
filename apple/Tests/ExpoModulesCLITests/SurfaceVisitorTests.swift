@@ -891,6 +891,214 @@ struct UnionSurfaceTests {
   }
 }
 
+@Suite("Exports surface: views")
+struct ViewSurfaceTests {
+  @Test
+  func `Extracts an @ExpoView class with its props type`() throws {
+    let view = try #require(
+      surface(
+        """
+        @ExpoView<CardProps>
+        public final class CardView: ExpoNativeView {
+          func didUpdateProps(_ diff: CardProps.Diff) {}
+        }
+        """
+      ).views.first
+    )
+
+    #expect(view.name == "CardView")
+    // `@ExpoView` takes no name, so the JS name is the class name.
+    #expect(view.jsName == "CardView")
+    #expect(view.propsType == "CardProps")
+    // The props are copied in once every file has been walked.
+    #expect(view.props == nil)
+    #expect(view.events == nil)
+    #expect(view.accessLevel == "public")
+    #expect(view.file == "Test.swift")
+  }
+
+  @Test
+  func `Reports a view whose attribute is qualified with ExpoModulesCore`() {
+    let visitor = surface(
+      """
+      @ExpoModulesCore.ExpoView<CardProps>
+      final class CardView: ExpoNativeView {}
+
+      @ExpoModulesCore.ViewProps
+      struct CardProps {
+        var title: String = ""
+      }
+      """
+    )
+
+    #expect(visitor.views.map(\.propsType) == ["CardProps"])
+    #expect(visitor.viewProps.map(\.name) == ["CardProps"])
+  }
+
+  @Test
+  func `Reads isOptional from the type, so every spelling of an optional counts`() throws {
+    let props = try #require(
+      surface(
+        """
+        @ViewProps
+        struct CardProps {
+          var a: Int? = nil
+          var b: (Int?) = nil
+          var c: Optional<Int> = nil
+          var d: Int! = nil
+          var e: Int = 0
+        }
+        """
+      ).viewProps.first
+    )
+
+    #expect(props.props.map(\.isOptional) == [true, true, true, true, false])
+  }
+
+  @Test
+  func `Reports only file-scope views with a props type`() {
+    let visitor = surface(
+      """
+      enum Outer {
+        @ExpoView<CardProps>
+        final class NestedView: ExpoNativeView {}
+      }
+
+      // The macro rejects a view without its props type.
+      @ExpoView
+      final class BareView: ExpoNativeView {}
+
+      // `@ExpoView` applies only to a class.
+      @ExpoView<CardProps>
+      struct NotAView {}
+      """
+    )
+
+    #expect(visitor.views.isEmpty)
+  }
+
+  @Test
+  func `Extracts the value props and events of a @ViewProps struct`() throws {
+    let props = try #require(
+      surface(
+        """
+        @ViewProps
+        public struct CardProps {
+          var title: String = ""
+          public var radius = 4.0
+          var subtitle: String?
+          var onTap: () -> Void
+          var onClose: (CloseEvent) -> Void = { _ in }
+          var onMove: @Sendable (Point) -> Void
+        }
+        """
+      ).viewProps.first
+    )
+
+    #expect(props.name == "CardProps")
+
+    #expect(props.props.map(\.name) == ["title", "radius", "subtitle"])
+    #expect(
+      props.props.map(\.type) == [
+        .primitive(name: "String", jsType: .string),
+        // The type of a literal initial value is inferred, as in the macro.
+        .primitive(name: "Double", jsType: .number),
+        .optional(wrapped: .primitive(name: "String", jsType: .string)),
+      ]
+    )
+    #expect(props.props.map(\.isOptional) == [false, false, true])
+    #expect(props.props.map(\.defaultValue) == ["\"\"", "4.0", nil])
+    #expect(props.props.map(\.accessLevel) == [nil, "public", nil])
+
+    // Event names are reported verbatim: a view event is a React prop name, so no `on` is stripped.
+    #expect(props.events.map(\.name) == ["onTap", "onClose", "onMove"])
+    #expect(props.events.map(\.payload) == [nil, .ref(name: "CloseEvent"), .ref(name: "Point")])
+  }
+
+  @Test
+  func `Leaves out the properties that the macro doesn't treat as props`() throws {
+    let props = try #require(
+      surface(
+        """
+        @ViewProps
+        struct CardProps {
+          var a: Int = 0, b: Int = 1
+          var observed: Int = 0 {
+            didSet {}
+          }
+          var settable: Int {
+            get { 0 }
+            set {}
+          }
+          var computed: Int { 0 }
+          static var shared: Int = 0
+          private var secret: Int = 0
+          fileprivate var hidden: Int = 0
+          lazy var cache: Int = 0
+          var untyped = makeValue()
+          #if os(iOS)
+          var conditional: Int = 0
+          #endif
+          var onOptional: (() -> Void)?
+          var onValue: () -> Int
+        }
+        """
+      ).viewProps.first
+    )
+
+    // Each binding of a declaration is a prop, and so is a property with observers or a setter.
+    #expect(props.props.map(\.name) == ["a", "b", "observed", "settable"])
+    // An optional event and one that returns a value are errors in the macro.
+    #expect(props.events.isEmpty)
+  }
+
+  @Test
+  func `Reports a nested @ViewProps struct under its qualified name`() {
+    let visitor = surface(
+      """
+      extension CardView {
+        @ViewProps
+        struct Props {
+          var title: String = ""
+        }
+      }
+
+      // `@ViewProps` applies only to a struct.
+      @ViewProps
+      final class NotProps {}
+      """
+    )
+
+    #expect(visitor.viewProps.map(\.name) == ["CardView.Props"])
+  }
+
+  @Test
+  func `Reports the platforms of views, props, and events in #if blocks`() throws {
+    let visitor = surface(
+      """
+      #if os(iOS)
+      @ExpoView<CardProps>
+      final class CardView: ExpoNativeView {}
+      #endif
+
+      @ViewProps
+      struct CardProps {
+        @available(iOS 17.0, *)
+        var title: String = ""
+        var onTap: () -> Void
+      }
+      """
+    )
+
+    let view = try #require(visitor.views.first)
+    #expect(view.platforms == [ExportedPlatform(name: "iOS", introduced: nil)])
+
+    let props = try #require(visitor.viewProps.first)
+    #expect(props.props.first?.platforms.first == ExportedPlatform(name: "iOS", introduced: "17.0"))
+    #expect(props.events.first?.platforms.map(\.name) == applePlatforms)
+  }
+}
+
 @Suite("Exports surface: events")
 struct EventSurfaceTests {
   @Test
@@ -1383,6 +1591,8 @@ struct ScanExportsTests {
       ("Options.swift", "@Record\nstruct R { var name: String }"),
       ("Status.swift", "enum E: String, Enumerable { case a }"),
       ("Source.swift", "@Union\nenum U { case text(String) }"),
+      ("View.swift", "@ExpoView<P>\nfinal class V: ExpoNativeView {}"),
+      ("Props.swift", "@ViewProps\nstruct P { var title: String = \"\" }"),
       ("Plain.swift", "final class Plain {}"),
     ]) { result in
       #expect(result.exports.modules.map(\.name) == ["M"])
@@ -1392,12 +1602,15 @@ struct ScanExportsTests {
       // the bare `Enumerable` conformance.
       #expect(result.exports.enums.map(\.name) == ["E"])
       #expect(result.exports.unions.map(\.name) == ["U"])
+      #expect(result.exports.views.map(\.name) == ["V"])
+      // The props struct is in another file, and its props are copied into the view.
+      #expect(result.exports.views.first?.props?.map(\.name) == ["title"])
       // Reported paths are absolute: a relative one would get the current directory as its base URL.
       #expect(result.exports.modules.first.map { URL(filePath: $0.file).baseURL == nil } == true)
       #expect(result.schemaVersion == scanExportsSchemaVersion)
-      // All six files are read; the plain one (no macro, no conformance) isn't parsed.
-      #expect(result.stats.filesScanned == 6)
-      #expect(result.stats.filesParsed == 5)
+      // All eight files are read; the plain one (no macro, no conformance) isn't parsed.
+      #expect(result.stats.filesScanned == 8)
+      #expect(result.stats.filesParsed == 7)
     }
   }
 }
@@ -1447,6 +1660,167 @@ struct RefResolutionTests {
     // A name the scan never declared stays unresolved: a platform convertible the consumer resolves
     // against its own catalog, not an error.
     #expect(types["x"] == .ref(name: "CGPoint"))
+  }
+
+  @Test
+  func `Copies the props and events of a view's props struct into the view`() throws {
+    let surface = try resolvedSurface(
+      """
+      @Record struct TapEvent { var x: Double }
+      enum Size: String, Enumerable { case small }
+
+      @ViewProps
+      struct CardProps {
+        var size: Size = .small
+        var onTap: (TapEvent) -> Void
+      }
+
+      @ExpoView<CardProps>
+      final class CardView: ExpoNativeView {}
+
+      @ExpoView<CardProps>
+      final class OtherCardView: ExpoNativeView {}
+
+      @ViewProps
+      struct UnusedProps {
+        var title: String = ""
+      }
+
+      @ExpoView<MissingProps>
+      final class MissingView: ExpoNativeView {}
+      """
+    )
+
+    #expect(surface.views.map(\.name) == ["CardView", "OtherCardView", "MissingView"])
+    #expect(surface.views.map(\.propsType) == ["CardProps", "CardProps", "MissingProps"])
+
+    // A props struct shared by two views is copied into each, with its refs resolved.
+    for view in surface.views.prefix(2) {
+      #expect(view.props?.map(\.type) == [.ref(name: "Size", refKind: .enum, jsTypeOverride: .string)])
+      #expect(view.events?.map(\.payload) == [.ref(name: "TapEvent", refKind: .record)])
+    }
+
+    // A props type the scan doesn't declare leaves the props unknown, which differs from no props.
+    let missing = try #require(surface.views.last)
+    #expect(missing.props == nil)
+    #expect(missing.events == nil)
+
+    // A props struct no view uses is not reported, and it isn't a ref kind either.
+    let data = try JSONEncoder().encode(surface)
+    let json = String(decoding: data, as: UTF8.self)
+    #expect(!json.contains("UnusedProps"))
+    #expect(!json.contains("viewProps"))
+  }
+
+  @Test
+  func `Keeps the generic arguments of a props type the scan doesn't declare`() throws {
+    let surface = try resolvedSurface(
+      """
+      @ExpoView<ExternalProps<Int>>
+      final class ExternalView: ExpoNativeView {}
+
+      @ExpoView<`Props`>
+      final class BacktickedView: ExpoNativeView {}
+      """
+    )
+
+    #expect(surface.views.map(\.propsType) == ["ExternalProps<Int>", "Props"])
+    #expect(surface.views.map(\.props) == [nil, nil])
+    // The lookup name isn't encoded.
+    let data = try JSONEncoder().encode(surface.views)
+    #expect(!String(decoding: data, as: UTF8.self).contains("propsTypeLookupName"))
+  }
+
+  @Test
+  func `Merges the props of a props struct declared in #if branches, by the view's platforms`() throws {
+    let surface = try resolvedSurface(
+      """
+      #if os(iOS)
+      @ViewProps
+      struct CardProps {
+        var pictureInPicture: Bool = false
+        var onEnterPictureInPicture: () -> Void
+      }
+      #else
+      @ViewProps
+      struct CardProps {
+        var title: String = ""
+      }
+      #endif
+
+      @ExpoView<CardProps>
+      final class CardView: ExpoNativeView {}
+
+      #if os(iOS)
+      @ExpoView<CardProps>
+      final class PhoneCardView: ExpoNativeView {}
+      #endif
+
+      #if os(tvOS)
+      @ExpoView<CardProps>
+      final class TVCardView: ExpoNativeView {}
+      #endif
+      """
+    )
+    let views = Dictionary(uniqueKeysWithValues: surface.views.map { ($0.name, $0) })
+
+    // An unconditional view gets the members of both declarations, each with its own platforms.
+    let card = try #require(views["CardView"])
+    #expect(card.props?.map(\.name) == ["pictureInPicture", "title"])
+    #expect(card.props?.map { $0.platforms.map(\.name) } == [["iOS"], ["macOS", "tvOS", "watchOS", "visionOS"]])
+    #expect(card.events?.map(\.name) == ["onEnterPictureInPicture"])
+
+    // A view on one platform gets only the declaration that builds there.
+    #expect(views["PhoneCardView"]?.props?.map(\.name) == ["pictureInPicture"])
+    #expect(views["PhoneCardView"]?.events?.map(\.name) == ["onEnterPictureInPicture"])
+    #expect(views["TVCardView"]?.props?.map(\.name) == ["title"])
+    #expect(views["TVCardView"]?.events == [])
+  }
+
+  @Test
+  func `Reports a view qualified with ExpoModulesCore through scan-exports`() throws {
+    let surface = try resolvedSurface(
+      """
+      @ExpoModulesCore.ExpoView<CardProps>
+      final class CardView: ExpoNativeView {}
+
+      @ExpoModulesCore.ViewProps
+      struct CardProps {
+        var title: String = ""
+      }
+      """
+    )
+
+    #expect(surface.views.map(\.name) == ["CardView"])
+    #expect(surface.views.first?.props?.map(\.name) == ["title"])
+  }
+
+  @Test
+  func `Finds a nested props struct and resolves the refs in it from the struct`() throws {
+    let surface = try resolvedSurface(
+      """
+      enum Size: String, Enumerable { case small }
+
+      @ExpoView<CardView.Props>
+      final class CardView: ExpoNativeView {}
+
+      extension CardView {
+        @ViewProps
+        struct Props {
+          enum Size: Int, Enumerable { case large }
+
+          var size: Size = .large
+        }
+      }
+      """
+    )
+
+    let view = try #require(surface.views.first)
+    #expect(view.propsType == "CardView.Props")
+    #expect(view.props?.map(\.name) == ["size"])
+    #expect(view.events == [])
+    // `Size` names the enum nested in the props struct, not the one at file scope.
+    #expect(view.props?.first?.type == .ref(name: "CardView.Props.Size", refKind: .enum, jsTypeOverride: .number))
   }
 
   @Test

@@ -374,6 +374,61 @@ export interface ExportedUnion extends ExportedAccess, ExportedAvailability {
   file: string;
 }
 
+/**
+ * One value prop of a `@ViewProps` struct: a stored property that isn't function-typed. It has no
+ * `required`: native code resets a prop that React leaves out to its default, so JS can always omit
+ * one.
+ */
+export interface ExportedViewProp extends ExportedAccess, ExportedAvailability {
+  name: string;
+  type: TypeNode;
+  /** Optional-typed: true exactly when `type` is an `optional` node. */
+  optional: boolean;
+  /** The initial value as Swift source text, absent when none is written. */
+  defaultValue?: string;
+}
+
+/**
+ * One event of a `@ViewProps` struct: a function-typed stored property. Its name is the React prop
+ * name as written, with no `on` prefix stripped, so it has no `jsName`.
+ */
+export interface ExportedViewEvent extends ExportedAccess, ExportedAvailability {
+  /** The Swift property name, e.g. `onTap`. */
+  name: string;
+  /**
+   * The type of the function's single parameter, absent when it takes none (`() -> Void`) or more
+   * than one.
+   */
+  payload?: TypeNode;
+}
+
+/**
+ * An `@ExpoView` class with the props and events of the `@ViewProps` struct in its generic argument.
+ * It is reported on its own rather than under a module.
+ */
+export interface ExportedView extends ExportedAccess, ExportedAvailability {
+  /** The Swift class name. Only a view declared at file scope is reported. */
+  name: string;
+  /** The name the view registers under. `@ExpoView` takes no name, so it is always the class name. */
+  jsName: string;
+  /**
+   * The props type: the generic argument of `@ExpoView<CardProps>`, as written without backticks
+   * (`ExternalProps<Int>`), or the qualified name of the scanned `@ViewProps` struct it names
+   * (`CardView.Props`).
+   */
+  propsType: string;
+  /**
+   * The value props of the `@ViewProps` struct, in declaration order. Absent when the scan declares
+   * no struct named `propsType` on a platform of the view, so unknown props differ from no props. A
+   * struct declared in several `#if` branches contributes the props of each declaration whose
+   * platforms overlap the view's, and each prop keeps its own `platforms`.
+   */
+  props?: ExportedViewProp[];
+  /** The events of the `@ViewProps` struct, in declaration order. Absent when `props` is absent. */
+  events?: ExportedViewEvent[];
+  file: string;
+}
+
 /** The exported types grouped by kind. */
 export interface ExportedSurface {
   modules: ExportedModule[];
@@ -381,6 +436,7 @@ export interface ExportedSurface {
   records: ExportedRecord[];
   enums: ExportedEnum[];
   unions: ExportedUnion[];
+  views: ExportedView[];
 }
 
 /** A `#if` condition the scan couldn't answer statically. */
@@ -401,14 +457,14 @@ export interface ScanStats {
 }
 
 /**
- * One class in the `scan-modules` output: an `@ExpoModule` class in `modules`, or a `@SharedObject`
- * class in `sharedObjects`.
+ * One class in the `scan-modules` output: an `@ExpoModule` class in `modules`, a `@SharedObject`
+ * class in `sharedObjects`, or an `@ExpoView` class in `views`.
  */
 export interface ScannedClass {
   name: string;
   /**
    * The resolved JS name: the `@ExpoModule("Foo")` or `@SharedObject("Foo")` override, else the class
-   * name.
+   * name. A view's JS name is its class name.
    */
   jsName: string;
   /**
@@ -432,6 +488,8 @@ export interface ScanModulesResult {
   modules: ScannedClass[];
   /** The top-level `@SharedObject` classes, with the same platform rules as `modules`. */
   sharedObjects: ScannedClass[];
+  /** The top-level `@ExpoView` classes, with the same platform rules as `modules`. */
+  views: ScannedClass[];
   warnings: ScanWarning[];
   stats: ScanStats;
 }
